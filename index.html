@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>FurniAR | AR Viewer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body {
+            margin: 0;
+            overflow-x: hidden;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+        }
+        #ar-viewport {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -1;
+        }
+        #ui-container {
+            position: relative;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            background-color: #f5f7fa;
+        }
+        #loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255,255,255,0.9);
+            display: none;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 100;
+        }
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 5px solid #f3f3f3;
+            border-top: 5px solid #3b7ad9;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .error-dialog {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            padding: 1rem;
+            background: #ff4444;
+            color: white;
+            text-align: center;
+            z-index: 1000;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+        }
+        .error-dialog button {
+            margin-top: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: white;
+            color: #333;
+            border: none;
+            border-radius: 4px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <!-- AR Viewport -->
+    <div id="ar-viewport"></div>
+
+    <!-- Loading Overlay -->
+    <div id="loading-overlay">
+        <div class="spinner mb-4"></div>
+        <p class="text-gray-700 font-medium">Loading AR experience...</p>
+    </div>
+
+    <!-- Main UI -->
+    <div id="ui-container">
+        <header class="p-6 flex justify-between items-center">
+            <div class="text-2xl font-bold text-blue-600">FurniAR</div>
+            <a href="shop.html" class="text-blue-600 font-medium">Shop →</a>
+        </header>
+        
+        <main class="flex-1 flex flex-col items-center justify-center text-center p-8">
+            <h1 class="text-4xl md:text-5xl font-bold mb-4">AR Furniture Viewer</h1>
+            <p class="text-lg text-gray-600 max-w-2xl mb-10">
+                View your selected furniture in your space
+            </p>
+            <button id="start-ar" class="bg-blue-600 hover:bg-blue-700 text-white px-8 py-4 rounded-full text-lg font-semibold flex items-center gap-2 transition transform hover:-translate-y-1 shadow-lg hover:shadow-xl">
+                <i class="fas fa-cube"></i>
+                Start AR Experience
+            </button>
+        </main>
+    </div>
+
+    <!-- Three.js dependencies -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/examples/js/webxr/ARButton.js"></script>
+
+    <script>
+        // Configuration
+        const MODELS = {
+            sofa: 'https://cdn.jsdelivr.net/gh/KhronosGroup/glTF-Sample-Models/2.0/Box/glTF/Box.gltf',
+            table: 'https://cdn.jsdelivr.net/gh/KhronosGroup/glTF-Sample-Models/2.0/Suzanne/glTF/Suzanne.gltf',
+            bookshelf: 'https://cdn.jsdelivr.net/gh/KhronosGroup/glTF-Sample-Models/2.0/Box/glTF/Box.gltf'
+        };
+
+        // Wait for everything to load
+        window.addEventListener('load', function() {
+            // Get DOM elements
+            const elements = {
+                viewport: document.getElementById('ar-viewport'),
+                loading: document.getElementById('loading-overlay'),
+                startButton: document.getElementById('start-ar'),
+                uiContainer: document.getElementById('ui-container')
+            };
+
+            let scene, camera, renderer, controller, model;
+
+            // Start AR when button clicked
+            elements.startButton.addEventListener('click', startARExperience);
+
+            // Check if coming from shop page
+            const urlParams = new URLSearchParams(window.location.search);
+            if (urlParams.has('model')) {
+                startARExperience();
+            }
+
+            async function startARExperience() {
+                try {
+                    // Show loading state
+                    elements.loading.style.display = 'flex';
+                    
+                    // Check AR support before initializing anything
+                    const arSupported = await checkARSupport();
+                    if (!arSupported.supported) {
+                        throw new Error(arSupported.message);
+                    }
+                    
+                    // Initialize Three.js
+                    initializeScene();
+                    
+                    // Load model
+                    const modelParam = urlParams.get('model') || 'sofa';
+                    await loadModel(modelParam);
+                    
+                    // Set up WebXR
+                    await setupWebXR();
+                    
+                    // Hide UI and loading
+                    elements.uiContainer.style.display = 'none';
+                    elements.loading.style.display = 'none';
+                    
+                } catch (error) {
+                    console.error("AR failed:", error);
+                    showErrorDialog(error.message);
+                    elements.loading.style.display = 'none';
+                }
+            }
+
+            async function checkARSupport() {
+                // Check secure context
+                if (!window.isSecureContext) {
+                    return {
+                        supported: false,
+                        message: "WebXR requires HTTPS or localhost. Your connection is not secure."
+                    };
+                }
+                
+                // Check for WebXR support
+                if (!navigator.xr) {
+                    return {
+                        supported: false,
+                        message: "Your browser doesn't support WebXR. Try Chrome for Android or Safari for iOS."
+                    };
+                }
+                
+                // Check for AR support
+                try {
+                    const supported = await navigator.xr.isSessionSupported('immersive-ar');
+                    if (!supported) {
+                        const isMobile = /Android|iPhone|iPad/i.test(navigator.userAgent);
+                        return {
+                            supported: false,
+                            message: isMobile 
+                                ? "Your device doesn't support AR. Try a newer Android/iOS device."
+                                : "AR requires a mobile device or Chrome desktop with WebXR emulator."
+                        };
+                    }
+                    return { supported: true };
+                } catch (e) {
+                    return {
+                        supported: false,
+                        message: "Couldn't check AR support. Try again later."
+                    };
+                }
+            }
+
+            function initializeScene() {
+                scene = new THREE.Scene();
+                
+                // Add lights
+                const ambientLight = new THREE.AmbientLight(0xffffff, 1);
+                scene.add(ambientLight);
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+                directionalLight.position.set(1, 1, 1);
+                scene.add(directionalLight);
+                
+                // Set up camera
+                camera = new THREE.PerspectiveCamera(
+                    60, 
+                    window.innerWidth / window.innerHeight, 
+                    0.1, 
+                    1000
+                );
+                
+                // Create renderer
+                renderer = new THREE.WebGLRenderer({ 
+                    antialias: true, 
+                    alpha: true 
+                });
+                renderer.setSize(window.innerWidth, window.innerHeight);
+                renderer.setPixelRatio(window.devicePixelRatio);
+                elements.viewport.appendChild(renderer.domElement);
+            }
+
+            async function setupWebXR() {
+                renderer.xr.enabled = true;
+                
+                const arButton = ARButton.createButton(renderer, {
+                    requiredFeatures: ['hit-test'],
+                    optionalFeatures: ['dom-overlay'],
+                    domOverlay: { root: document.body }
+                });
+                
+                document.body.appendChild(arButton);
+                
+                controller = renderer.xr.getController(0);
+                controller.addEventListener('select', placeModel);
+                scene.add(controller);
+                
+                renderer.setAnimationLoop(() => {
+                    if (!renderer.xr.isPresenting) return;
+                    renderer.render(scene, camera);
+                });
+            }
+
+            async function loadModel(modelKey) {
+                return new Promise((resolve) => {
+                    const loader = new THREE.GLTFLoader();
+                    loader.load(MODELS[modelKey], 
+                        (gltf) => {
+                            model = gltf.scene;
+                            model.scale.set(0.5, 0.5, 0.5);
+                            model.visible = false;
+                            scene.add(model);
+                            resolve();
+                        },
+                        undefined,
+                        (error) => {
+                            console.error("Model failed to load, using fallback");
+                            createFallbackModel();
+                            resolve();
+                        }
+                    );
+                });
+            }
+
+            function createFallbackModel() {
+                const geometry = new THREE.BoxGeometry(0.5, 0.5, 0.5);
+                const material = new THREE.MeshBasicMaterial({ 
+                    color: 0x3b7ad9,
+                    transparent: true,
+                    opacity: 0.8
+                });
+                model = new THREE.Mesh(geometry, material);
+                model.visible = false;
+                scene.add(model);
+            }
+
+            function placeModel() {
+                if (model) {
+                    model.position.set(0, 0, -1).applyMatrix4(controller.matrixWorld);
+                    model.visible = true;
+                }
+            }
+
+            function showErrorDialog(message) {
+                // Remove any existing error dialogs
+                const existingDialog = document.querySelector('.error-dialog');
+                if (existingDialog) existingDialog.remove();
+                
+                const dialog = document.createElement('div');
+                dialog.className = 'error-dialog';
+                dialog.innerHTML = `
+                    <p>${message}</p>
+                    <p class="text-sm mt-2">Supported browsers: Chrome for Android (ARCore devices), Safari for iOS (ARKit devices)</p>
+                    <button onclick="this.parentNode.remove()">OK</button>
+                `;
+                document.body.appendChild(dialog);
+            }
+
+            // Handle window resize
+            window.addEventListener('resize', () => {
+                if (camera && renderer) {
+                    camera.aspect = window.innerWidth / window.innerHeight;
+                    camera.updateProjectionMatrix();
+                    renderer.setSize(window.innerWidth, window.innerHeight);
+                }
+            });
+        });
+    </script>
+</body>
+</html>
